@@ -23,6 +23,9 @@ Saida:
   output/video_final_<timestamp>.mp4
 """
 
+import os
+os.environ["PATH"] += ":/usr/bin"
+
 import json
 import subprocess
 import sys

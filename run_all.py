@@ -82,19 +82,19 @@ def main():
     log("--- FASE 1: Seleção do jogo + roteiro + áudio ---")
     if not run_script("video_pipeline_phase1.py"):
         log("FALHA na Fase 1. Abortando pipeline.")
-        sys.exit(1)
+        return
 
     # ── Fase 2 ──
     log("--- FASE 2: Geração do vídeo ---")
     if not run_script("video_pipeline_phase2.py"):
         log("FALHA na Fase 2. Abortando pipeline.")
-        sys.exit(1)
+        return
 
     # ── Fase 3 ──
     log("--- FASE 3: Upload para o YouTube ---")
     if not run_script("video_pipeline_phase3.py"):
         log("FALHA na Fase 3. Vídeo gerado mas não postado.")
-        sys.exit(1)
+        return
 
     n_agora = posts_today()
     log(f"Pipeline concluído. Posts hoje: {n_agora}/2")
