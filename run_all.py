@@ -1,14 +1,13 @@
 """
-RUN ALL — Orquestrador Completo
-================================
-Executa as 3 fases em sequência e gerencia os 2 posts diários.
+RUN ALL — Orquestrador Completo com Agendador Interno
+======================================================
+Fica rodando continuamente e executa o pipeline nos horários:
+    09:00 BRT
+    13:00 BRT
+    17:00 BRT
 
-Usado pela Railway via cron job:
-    09:00 BRT → python run_all.py
-    13:00 BRT → python run_all.py
-
-O script detecta automaticamente se é o 1º ou 2º post do dia
-e garante que não repita o mesmo jogo.
+Não precisa de cron externo no Railway.
+Basta o Railway manter o container ativo (Start Command: python run_all.py).
 
 Variáveis de ambiente necessárias na Railway:
     OPENAI_API_KEY
@@ -21,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -31,21 +31,29 @@ LOG_FILE     = OUTPUT_DIR / "run_log.txt"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+# Horários de execução (hora, minuto) no fuso de Brasília
+SCHEDULE = [
+    (9, 0),
+    (13, 0),
+    (17, 0),
+]
+
+MAX_POSTS_PER_DAY = 3
+
 
 def log(msg: str):
     timestamp = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {msg}"
-    print(line)
+    print(line, flush=True)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(line + "\n")
 
 
 def run_script(script: str) -> bool:
-    """Executa um script Python e retorna True se bem-sucedido."""
     log(f"Iniciando: {script}")
     result = subprocess.run(
         [sys.executable, script],
-        capture_output=False,   # mostra output em tempo real no Railway
+        capture_output=False,
     )
     if result.returncode != 0:
         log(f"ERRO em {script} — código {result.returncode}")
@@ -55,50 +63,87 @@ def run_script(script: str) -> bool:
 
 
 def posts_today() -> int:
-    """Retorna quantos posts já foram feitos hoje."""
     today = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d")
     if not CONTROL_FILE.exists():
         return 0
-    data = json.loads(CONTROL_FILE.read_text(encoding="utf-8"))
-    if data.get("date") != today:
+    try:
+        data = json.loads(CONTROL_FILE.read_text(encoding="utf-8"))
+        if data.get("date") != today:
+            return 0
+        return len(data.get("match_ids", []))
+    except Exception:
         return 0
-    return len(data.get("match_ids", []))
 
 
-def main():
+def run_pipeline():
     now_brt = datetime.now(ZoneInfo("America/Sao_Paulo"))
     log("=" * 54)
     log(f"RUN ALL — {now_brt.strftime('%Y-%m-%d %H:%M')} BRT")
     log("=" * 54)
 
     n_posts = posts_today()
-    log(f"Posts realizados hoje: {n_posts}/2")
+    log(f"Posts realizados hoje: {n_posts}/{MAX_POSTS_PER_DAY}")
 
-    if n_posts >= 2:
-        log("Limite de 2 posts diários atingido. Encerrando.")
+    if n_posts >= MAX_POSTS_PER_DAY:
+        log("Limite de posts diários atingido. Pulando.")
         return
 
-    # ── Fase 1 ──
     log("--- FASE 1: Seleção do jogo + roteiro + áudio ---")
     if not run_script("video_pipeline_phase1.py"):
         log("FALHA na Fase 1. Abortando pipeline.")
         return
 
-    # ── Fase 2 ──
     log("--- FASE 2: Geração do vídeo ---")
     if not run_script("video_pipeline_phase2.py"):
         log("FALHA na Fase 2. Abortando pipeline.")
         return
 
-    # ── Fase 3 ──
     log("--- FASE 3: Upload para o YouTube ---")
     if not run_script("video_pipeline_phase3.py"):
         log("FALHA na Fase 3. Vídeo gerado mas não postado.")
         return
 
-    n_agora = posts_today()
-    log(f"Pipeline concluído. Posts hoje: {n_agora}/2")
+    log(f"Pipeline concluído. Posts hoje: {posts_today()}/{MAX_POSTS_PER_DAY}")
     log("=" * 54)
+
+
+def already_ran_this_slot(hora: int, minuto: int) -> bool:
+    """Verifica se já rodou neste slot hoje consultando o log."""
+    today = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d")
+    slot_str = f"{today} {hora:02d}:{minuto:02d}"
+    if not LOG_FILE.exists():
+        return False
+    content = LOG_FILE.read_text(encoding="utf-8")
+    return slot_str in content
+
+
+def main():
+    log("Agendador iniciado. Aguardando horários: 09:00, 13:00, 17:00 BRT")
+
+    # Rastreia qual slot já foi executado nesta sessão
+    ran_slots = set()
+
+    while True:
+        now = datetime.now(ZoneInfo("America/Sao_Paulo"))
+        hora_atual   = now.hour
+        minuto_atual = now.minute
+        hoje         = now.strftime("%Y-%m-%d")
+
+        for (hora, minuto) in SCHEDULE:
+            slot_key = f"{hoje}_{hora}_{minuto}"
+
+            # Executa se estiver dentro de 1 minuto do horário e ainda não rodou
+            if (hora_atual == hora and minuto_atual == minuto
+                    and slot_key not in ran_slots):
+                ran_slots.add(slot_key)
+                run_pipeline()
+                break
+
+        # Limpa slots de dias anteriores do set
+        ran_slots = {s for s in ran_slots if s.startswith(hoje)}
+
+        # Verifica a cada 30 segundos
+        time.sleep(30)
 
 
 if __name__ == "__main__":
