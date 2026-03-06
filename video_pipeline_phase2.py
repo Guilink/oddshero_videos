@@ -65,6 +65,12 @@ DUR_V4      = 3
 # Duracao total minima = 42s — o audio determina o corte final via -shortest
 
 
+import subprocess
+result = subprocess.run(["which", "ffmpeg"], capture_output=True, text=True)
+print(f"[DEBUG] FFmpeg path: {result.stdout}")
+result2 = subprocess.run(["echo", "$PATH"], capture_output=True, text=True, shell=True)
+print(f"[DEBUG] PATH: {os.environ.get('PATH')}")
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def check_ffmpeg():
