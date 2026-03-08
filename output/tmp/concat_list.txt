@@ -1,6 +1,0 @@
-file 'C:\Users\User\Desktop\moneyfut\moneyfut\output\tmp\seg1.mp4'
-file 'C:\Users\User\Desktop\moneyfut\moneyfut\output\tmp\seg2.mp4'
-file 'C:\Users\User\Desktop\moneyfut\moneyfut\output\tmp\seg3.mp4'
-file 'C:\Users\User\Desktop\moneyfut\moneyfut\output\tmp\seg4.mp4'
-file 'C:\Users\User\Desktop\moneyfut\moneyfut\output\tmp\seg5.mp4'
-file 'C:\Users\User\Desktop\moneyfut\moneyfut\output\tmp\seg6.mp4'

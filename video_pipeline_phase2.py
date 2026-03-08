@@ -1,26 +1,16 @@
 """
-VIDEO PIPELINE — FASE 2  (nova estrutura)
-==========================================
+VIDEO PIPELINE — FASE 2 (SIMPLIFICADO)
+=======================================
+Entrada : assets/video_base_total.mp4   — vídeo completo com áudio e narração
+          output/game_data_latest.json  — dados gerados pela Fase 1
 
-Estrutura:
-  [0s-6s]    video_base.mp4  + overlay topo (emblemas, times, data)
-  [6s-12s]   video_base2.mp4 + overlay topo
-  [12s-??s]  Slide STATS — historico recente + medias de gols
-  [??s-??s]  Slide TIP  — tip limpa e elegante
-  [??s-??s]  video_base3.mp4 + overlay CTA (mensagem da IA)
-  [??s-fim]  video_base4.mp4 + overlay CTA
+Slots no vídeo base:
+  [0s  – 5s ]  Chroma key verde → overlay dos emblemas dos times
+  [5s  – 13s]  Vídeo normal (sem alteração)
+  [13s – 19s]  Slide da análise Telegram (sobreposto ao fundo preto)
+  [19s – fim]  Vídeo normal (sem alteração)
 
-Assets necessarios:
-  assets/video_base.mp4
-  assets/video_base2.mp4
-  assets/video_base3.mp4
-  assets/video_base4.mp4
-
-Entrada:
-  output/game_data_latest.json  (gerado pela Fase 1)
-
-Saida:
-  output/video_final_<timestamp>.mp4
+Saída : output/video_final_<timestamp>.mp4
 """
 
 import os
@@ -42,34 +32,29 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 ASSETS_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
-W, H   = 1080, 1920
-FPS    = 30
+W, H = None, None  # detectado automaticamente do vídeo base
+FPS  = 30
 
-# Paleta
-BG      = (10, 10, 12)
-GOLD    = (212, 175, 55)
-GREEN   = (0, 200, 100)
-WHITE   = (255, 255, 255)
-GRAY    = (155, 155, 155)
-DGRAY   = (80, 80, 80)
-CARD    = (20, 20, 24)
-GOLD_D  = (130, 105, 28)
+# Slots de tempo (segundos)
+CHROMA_START = 0.0
+CHROMA_END   = 5.0
+SLIDE_START  = 13.0
+SLIDE_END    = 19.4
 
-# Duracoes fixas (segundos)
-DUR_V1      = 6
-DUR_V2      = 6
-DUR_STATS   = 10
-DUR_TIP     = 8
-DUR_V3      = 3
-DUR_V4      = 3
-# Duracao total minima = 42s — o audio determina o corte final via -shortest
+# Chroma key
+CHROMA_COLOR      = "0x00b140"
+CHROMA_SIMILARITY = "0.13"
+CHROMA_BLEND      = "0.02"
 
+# Paleta Telegram
+TG_BG      = (14, 22, 33)
+TG_BUBBLE  = (23, 33, 43)
+TG_BUBBLE2 = (30, 42, 55)
+TG_GREEN   = (100, 200, 110)
+TG_WHITE   = (230, 234, 238)
+TG_GRAY    = (140, 152, 164)
+TG_GOLD    = (212, 175, 55)
 
-import subprocess
-result = subprocess.run(["which", "ffmpeg"], capture_output=True, text=True)
-print(f"[DEBUG] FFmpeg path: {result.stdout}")
-result2 = subprocess.run(["echo", "$PATH"], capture_output=True, text=True, shell=True)
-print(f"[DEBUG] PATH: {os.environ.get('PATH')}")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -80,7 +65,7 @@ def check_ffmpeg():
     except Exception:
         return False
 
-def audio_duration(path: Path) -> float:
+def get_video_duration(path: Path) -> float:
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
@@ -88,7 +73,7 @@ def audio_duration(path: Path) -> float:
     try:
         return float(r.stdout.strip())
     except Exception:
-        return 50.0
+        return 5.0
 
 def dl(url: str, dest: Path):
     try:
@@ -109,557 +94,381 @@ def font(size, bold=False):
          "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
     )
     for p in cands:
-        try: return ImageFont.truetype(p, size)
-        except Exception: pass
-    return ImageFont.load_default()
-
-def ctext(draw, text, y, f, color, max_w=None, gap=8):
-    """Texto centralizado com quebra de linha opcional."""
-    if max_w:
-        words, lines, cur = text.split(), [], ""
-        for w in words:
-            test = f"{cur} {w}".strip()
-            if draw.textbbox((0,0), test, font=f)[2] > max_w and cur:
-                lines.append(cur); cur = w
-            else:
-                cur = test
-        if cur: lines.append(cur)
-    else:
-        lines = [text]
-    lh = draw.textbbox((0,0), lines[0], font=f)[3] + gap
-    for i, line in enumerate(lines):
-        bx = draw.textbbox((0,0), line, font=f)
-        draw.text(((W - bx[2]) // 2, y + i * lh), line, font=f, fill=color)
-    return len(lines) * lh
-
-def hline(draw, y, w=420, color=None):
-    color = color or GOLD
-    x0 = (W - w) // 2
-    draw.rectangle([x0, y, x0 + w, y + 3], fill=color)
-
-def badge_paste(img, path, cx, cy, size):
-    from PIL import ImageDraw as ID
-    if path and Path(path).exists():
         try:
-            b = Image.open(path).convert("RGBA").resize((size, size), Image.LANCZOS)
-            mask = Image.new("L", (size, size), 0)
-            ID.Draw(mask).ellipse([0, 0, size-1, size-1], fill=255)
-            bg = Image.new("RGBA", (size, size), (28, 28, 32, 220))
-            bg.paste(b, mask=b.split()[3] if b.mode == "RGBA" else None)
-            img.paste(bg, (cx - size//2, cy - size//2), mask)
-            return
+            return ImageFont.truetype(p, size)
         except Exception:
             pass
-    draw = ImageDraw.Draw(img)
-    draw.ellipse([cx-size//2, cy-size//2, cx+size//2, cy+size//2],
-                 fill=(35,35,40), outline=GOLD, width=3)
+    return ImageFont.load_default()
+
+def wrap_text(draw, text, f, max_w):
+    words = text.split()
+    lines, cur = [], ""
+    for w in words:
+        test = f"{cur} {w}".strip()
+        if draw.textbbox((0, 0), test, font=f)[2] > max_w and cur:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = test
+    if cur:
+        lines.append(cur)
+    return lines
 
 
-# ── FFmpeg helpers ────────────────────────────────────────────────────────────
+# ── Overlay de emblemas estilo Sofascore ──────────────────────────────────────
 
-def img2vid(img: Image.Image, dur: float, out: Path):
-    png = out.with_suffix(".png")
-    img.save(png, "PNG")
+def make_overlay_emblemas(
+    home_team, away_team, league, match_date, match_time,
+    home_badge, away_badge, video_base
+) -> Path:
     r = subprocess.run([
-        "ffmpeg", "-y", "-loop", "1", "-i", str(png),
-        "-t", str(dur),
-        "-vf", f"scale={W}:{H},fps={FPS}",
-        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p", "-an",
-        str(out)
-    ], capture_output=True)
-    png.unlink(missing_ok=True)
-    if r.returncode != 0:
-        print("[ERRO img2vid]", r.stderr.decode(errors="replace")[-800:])
-        raise RuntimeError("img2vid falhou")
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0", str(video_base)
+    ], capture_output=True, text=True)
+    try:
+        vw, vh = map(int, r.stdout.strip().split(","))
+    except Exception:
+        vw, vh = 1080, 1920
 
-def vid_overlay(src: Path, ov_png: Path, dur: float, out: Path):
-    r = subprocess.run([
-        "ffmpeg", "-y",
-        "-stream_loop", "-1", "-i", str(src),
-        "-i", str(ov_png),
-        "-t", str(dur),
-        "-filter_complex",
-        (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-         f"crop={W}:{H},setsar=1,fps={FPS}[bg];"
-         f"[1:v]scale={W}:{H},format=rgba[ov];"
-         f"[bg][ov]overlay=0:0:format=auto[out]"),
-        "-map", "[out]",
-        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p", "-an",
-        str(out)
-    ], capture_output=True)
-    if r.returncode != 0:
-        print("[ERRO vid_overlay]", r.stderr.decode(errors="replace")[-800:])
-        raise RuntimeError(f"vid_overlay falhou para {src.name}")
+    print(f"  [OVERLAY] Dimensões do vídeo: {vw}x{vh}")
 
-def concat(parts: list, out: Path):
-    lf = TEMP_DIR / "concat_list.txt"
-    lf.write_text("\n".join(f"file '{p.resolve()}'" for p in parts))
-    subprocess.run([
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-        "-i", str(lf), "-c", "copy", str(out)
-    ], capture_output=True, check=True)
+    s = vw / 478
 
-def mux(vid: Path, aud: Path, out: Path):
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-i", str(vid), "-i", str(aud),
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-        "-shortest", str(out)
-    ], capture_output=True, check=True)
+    C_BG       = (16, 20, 31)
+    C_CARD     = (22, 28, 45)
+    C_BORDER   = (38, 48, 72)
+    C_YELLOW   = (255, 204, 0)
+    C_YELLOW_D = (200, 158, 0)
+    C_WHITE    = (240, 245, 255)
+    C_GRAY     = (120, 140, 170)
 
+    img = Image.new("RGB", (vw, vh), C_BG)
+    d   = ImageDraw.Draw(img)
 
-# ── Overlay A: topo com emblemas (intro) ──────────────────────────────────────
+    d.rectangle([0, 0, vw, vh], fill=C_BG)
 
-def make_overlay_intro(home_team, away_team, league, match_date, match_time,
-                       home_badge, away_badge) -> Path:
-    ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    panel_h = 720
-    ov.paste(Image.new("RGBA", (W, panel_h), (8, 8, 12, 210)), (0, 0))
-    d = ImageDraw.Draw(ov)
-    d.rectangle([0, panel_h - 4, W, panel_h], fill=GOLD)
+    card_x = int(10 * s)
+    card_y = int(60 * s)
+    card_w = vw - int(20 * s)
+    card_h = vh - int(80 * s)
+    d.rounded_rectangle(
+        [card_x, card_y, card_x + card_w, card_y + card_h],
+        radius=int(10 * s), fill=C_CARD
+    )
+    d.rectangle([card_x, card_y, card_x + card_w, card_y + int(3*s)], fill=C_YELLOW)
 
-    ctext(d, "ODDSHERO AI", 32, font(44, bold=True), GOLD)
-    hline(d, 96, w=440)
+    fn_liga = font(max(10, int(12 * s)))
+    liga_text = league.upper()[:36]
+    bx_l = d.textbbox((0, 0), liga_text, font=fn_liga)
+    d.text(((vw - bx_l[2]) // 2, card_y + int(10 * s)), liga_text, font=fn_liga, fill=C_GRAY)
 
+    anchor_x = int(135 * s)
+    anchor_y = int(350 * s)
+    block_w  = int(260 * s)
+    badge_s  = int(78 * s)
+    home_cx  = anchor_x + int(38 * s)
+    away_cx  = anchor_x + block_w - int(38 * s)
+    badge_cy = anchor_y + int(55 * s)
+
+    def paste_badge(badge_path, cx, cy, size, team_name):
+        if badge_path and Path(str(badge_path)).exists():
+            try:
+                b = Image.open(str(badge_path)).convert("RGBA").resize((size, size), Image.LANCZOS)
+                bg = Image.new("RGB", (size, size), C_CARD)
+                bg.paste(b, mask=b.split()[3])
+                img.paste(bg, (cx - size // 2, cy - size // 2))
+                return
+            except Exception:
+                pass
+        d.ellipse([cx-size//2, cy-size//2, cx+size//2, cy+size//2],
+                  fill=C_BORDER, outline=C_YELLOW_D, width=int(2*s))
+        fn_i = font(max(18, int(size * 0.4)), bold=True)
+        letter = team_name[0]
+        bx = d.textbbox((0, 0), letter, font=fn_i)
+        d.text((cx - bx[2]//2, cy - bx[3]//2), letter, font=fn_i, fill=C_WHITE)
+
+    paste_badge(home_badge, home_cx, badge_cy, badge_s, home_team)
+    paste_badge(away_badge, away_cx, badge_cy, badge_s, away_team)
+
+    fn_vs = font(max(20, int(24 * s)), bold=True)
+    vs_cx = anchor_x + block_w // 2
+    bx_vs = d.textbbox((0, 0), "VS", font=fn_vs)
+    d.text((vs_cx - bx_vs[2]//2, badge_cy - bx_vs[3]//2 - int(10*s)),
+           "VS", font=fn_vs, fill=C_YELLOW)
+
+    fn_hora = font(max(14, int(16 * s)), bold=True)
     try:
         date_str = datetime.strptime(match_date, "%Y-%m-%d").strftime("%d/%m/%Y")
     except Exception:
         date_str = match_date
+    bx_d = d.textbbox((0, 0), date_str, font=fn_hora)
+    d.text((vs_cx - bx_d[2]//2, badge_cy + int(16*s)),
+           date_str, font=fn_hora, fill=C_YELLOW)
+    bx_t = d.textbbox((0, 0), match_time, font=fn_hora)
+    d.text((vs_cx - bx_t[2]//2, badge_cy + int(34*s)),
+           match_time, font=fn_hora, fill=C_YELLOW)
 
-    ctext(d, league.upper(), 112, font(30), GRAY, max_w=900)
-    ctext(d, f"{date_str}  •  {match_time}", 156, font(36, bold=True), WHITE)
+    fn_team = font(max(14, int(16 * s)), bold=True)
+    name_y  = badge_cy + badge_s // 2 + int(10 * s)
+    for name, cx in [(home_team, home_cx), (away_team, away_cx)]:
+        short = name[:14]
+        bx = d.textbbox((0, 0), short, font=fn_team)
+        d.text((cx - bx[2]//2, name_y), short, font=fn_team, fill=C_WHITE)
 
-    bsize, bcy = 230, 400
-    badge_paste(ov, home_badge, W // 4, bcy, bsize)
-    badge_paste(ov, away_badge, 3 * W // 4, bcy, bsize)
-    ctext(d, "VS", bcy - 46, font(84, bold=True), GOLD)
-
-    ny = bcy + bsize // 2 + 20
-    fn = font(38, bold=True)
-
-    def tlabel(name, cx):
-        words, lines, cur = name.split(), [], ""
-        for w in words:
-            test = f"{cur} {w}".strip()
-            if d.textbbox((0,0), test, font=fn)[2] > 420 and cur:
-                lines.append(cur); cur = w
-            else:
-                cur = test
-        if cur: lines.append(cur)
-        lh = d.textbbox((0,0), lines[0], font=fn)[3] + 6
-        for i, l in enumerate(lines):
-            bx = d.textbbox((0,0), l, font=fn)
-            d.text((cx - bx[2]//2, ny + i*lh), l, font=fn, fill=WHITE)
-
-    tlabel(home_team, W // 4)
-    tlabel(away_team, 3 * W // 4)
-
-    out = TEMP_DIR / "overlay_intro.png"
-    ov.save(out, "PNG")
+    out = TEMP_DIR / "overlay_emblemas.png"
+    img.save(out, "PNG")
     return out
 
 
-# ── Overlay B: CTA final (fundo dos videos 3 e 4) ─────────────────────────────
+# ── Slide Telegram ────────────────────────────────────────────────────────────
 
-def make_overlay_cta() -> Path:
-    """
-    Painel inferior semitransparente com a mensagem da IA.
-    Ocupa a metade de baixo da tela para nao cobrir o video dos robos.
-    """
-    ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+def make_slide_telegram(
+    home_team, away_team, league, match_time, match_date,
+    script_text, tip_display
+) -> Path:
+    """Gera o slide da análise e salva como PNG transparente (RGBA)."""
 
-    panel_top = H // 2
-    panel_h   = H - panel_top
-    panel = Image.new("RGBA", (W, panel_h), (6, 6, 10, 225))
-    ov.paste(panel, (0, panel_top))
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))  # fundo transparente
+    d   = ImageDraw.Draw(img)
 
-    d = ImageDraw.Draw(ov)
-    d.rectangle([0, panel_top, W, panel_top + 4], fill=GOLD)
+    now_str = datetime.now().strftime("%H:%M")
+    try:
+        date_str = datetime.strptime(match_date, "%Y-%m-%d").strftime("%d/%m")
+    except Exception:
+        date_str = match_date
 
-    y = panel_top + 48
+    bubble_x   = 40
+    bubble_w   = W - 80
+    bubble_pad = 28
+    y = 60
 
-    ctext(d, "EXISTE UMA IA QUE FAZ ISSO", y, font(52, bold=True), GOLD, max_w=920)
-    y += 130
-    ctext(d, "POR VOCE, AO VIVO.", y, font(52, bold=True), WHITE, max_w=920)
-    y += 100
-    hline(d, y, w=500)
-    y += 36
+    # Bolha 1: cabeçalho do jogo
+    lines_header = [
+        f"⚽  {home_team}  x  {away_team}",
+        f"🏆  {league}",
+        f"🕐  {date_str}  •  {match_time}",
+    ]
+    fn_sub = font(30)
+    b1_h = bubble_pad * 2 + 44 + len(lines_header) * 50
+    b1_y = y
+    d.rounded_rectangle([bubble_x, b1_y, bubble_x + bubble_w, b1_y + b1_h],
+                        radius=18, fill=(*TG_BUBBLE2, 230))
+    d.rounded_rectangle([bubble_x, b1_y, bubble_x + bubble_w, b1_y + 5],
+                        radius=4, fill=(*TG_GOLD, 255))
+    ty = b1_y + bubble_pad + 8
+    d.text((bubble_x + bubble_pad, ty), "ANÁLISE AO VIVO",
+           font=font(30, bold=True), fill=(*TG_GOLD, 255))
+    ty += 46
+    for line in lines_header:
+        d.text((bubble_x + bubble_pad, ty), line, font=fn_sub, fill=(*TG_WHITE, 255))
+        ty += 50
+    y = b1_y + b1_h + 20
 
-    ctext(d, "Cruza estatisticas em tempo real", y, font(36), WHITE, max_w=880)
-    y += 54
-    ctext(d, "com as melhores odds do momento", y, font(36), WHITE, max_w=880)
-    y += 54
-    ctext(d, "e gera a analise mais precisa possivel.", y, font(36), WHITE, max_w=880)
-    y += 80
+    # Bolha 2: texto da análise
+    fn_body  = font(30)
+    max_text_w = bubble_w - bubble_pad * 2
+    all_lines = []
+    for paragraph in script_text.split("\n"):
+        if paragraph.strip():
+            all_lines.extend(wrap_text(d, paragraph.strip(), fn_body, max_text_w))
+            all_lines.append("")
+    while all_lines and all_lines[-1] == "":
+        all_lines.pop()
 
-    # CTA box
-    bx0, bx1 = 120, W - 120
-    by0 = y
-    by1 = by0 + 160
-    d.rounded_rectangle([bx0, by0, bx1, by1], radius=20, fill=(15, 15, 20), outline=GOLD, width=3)
-    ctext(d, "ACESSE GRATIS AGORA", by0 + 28, font(40, bold=True), GOLD)
-    ctext(d, "Link na bio  •  Telegram: @oddshero_bot", by0 + 90, font(30), WHITE)
+    line_h = 44
+    b2_h   = bubble_pad * 2 + len(all_lines) * line_h + 20
+    b2_y   = y
+    d.rounded_rectangle([bubble_x, b2_y, bubble_x + bubble_w, b2_y + b2_h],
+                        radius=18, fill=(*TG_BUBBLE, 230))
+    ty = b2_y + bubble_pad
+    for line in all_lines:
+        if line == "":
+            ty += 10
+            continue
+        d.text((bubble_x + bubble_pad, ty), line, font=fn_body, fill=(*TG_WHITE, 255))
+        ty += line_h
+    d.text((bubble_x + bubble_w - 90, b2_y + b2_h - 36),
+           now_str, font=font(24), fill=(*TG_GRAY, 255))
+    y = b2_y + b2_h + 20
 
-    out = TEMP_DIR / "overlay_cta.png"
-    ov.save(out, "PNG")
+    # Bolha 3: TIP
+    fn_tip   = font(42, bold=True)
+    tip_lines = wrap_text(d, f"💡 TIP: {tip_display}", fn_tip, bubble_w - bubble_pad * 2)
+    b3_h = bubble_pad * 2 + len(tip_lines) * 58
+    b3_y = y
+    d.rounded_rectangle([bubble_x, b3_y, bubble_x + bubble_w, b3_y + b3_h],
+                        radius=18, fill=(20, 40, 28, 230))
+    d.rounded_rectangle([bubble_x, b3_y, bubble_x + bubble_w, b3_y + 5],
+                        radius=4, fill=(*TG_GREEN, 255))
+    ty = b3_y + bubble_pad
+    for line in tip_lines:
+        d.text((bubble_x + bubble_pad, ty), line, font=fn_tip, fill=(*TG_GREEN, 255))
+        ty += 58
+
+    out = TEMP_DIR / "slide_analise.png"
+    img.save(out, "PNG")
     return out
 
 
-# ── Slide STATS ───────────────────────────────────────────────────────────────
-
-def make_slide_stats(home_team: str, away_team: str, stats: dict) -> Image.Image:
-    img = Image.new("RGB", (W, H), BG)
-    d   = ImageDraw.Draw(img)
-
-    # fundo sutil
-    for i in range(0, H, 55):
-        d.line([(0, i), (W, i)], fill=tuple(min(255, v+5) for v in BG), width=1)
-
-    ctext(d, "ODDSHERO AI", 72, font(42, bold=True), GOLD)
-    hline(d, 132, w=430)
-    ctext(d, "DADOS DO JOGO", 158, font(36, bold=True), GREEN)
-    hline(d, 212, w=300, color=DGRAY)
-
-    y = 250
-
-    # ── Medias de gols ──
-    home_s = stats.get("home_avg_scored")
-    home_c = stats.get("home_avg_conceded")
-    away_s = stats.get("away_avg_scored")
-    away_c = stats.get("away_avg_conceded")
-
-    if any(v is not None for v in [home_s, home_c, away_s, away_c]):
-        ctext(d, "MEDIA DE GOLS (ultimos 5 jogos)", y, font(30, bold=True), GRAY, max_w=880)
-        y += 52
-
-        col_w = (W - 160) // 2
-        lx = 80
-        rx = W // 2 + 40
-
-        fn_team = font(32, bold=True)
-        fn_stat = font(28)
-        fn_val  = font(52, bold=True)
-
-        # Casa
-        hn = home_team[:18]
-        bx = d.textbbox((0,0), hn, font=fn_team)
-        d.text((lx, y), hn, font=fn_team, fill=WHITE)
-        if home_s is not None:
-            d.text((lx, y + 46), f"Marcados:", font=fn_stat, fill=GRAY)
-            d.text((lx, y + 80), f"{home_s}", font=fn_val, fill=GREEN)
-        if home_c is not None:
-            d.text((lx + 180, y + 46), f"Sofridos:", font=fn_stat, fill=GRAY)
-            d.text((lx + 180, y + 80), f"{home_c}", font=fn_val, fill=(220, 80, 80))
-
-        # Separador vertical
-        mid = W // 2
-        d.line([(mid, y - 8), (mid, y + 150)], fill=DGRAY, width=2)
-
-        # Fora
-        an = away_team[:18]
-        d.text((rx, y), an, font=fn_team, fill=WHITE)
-        if away_s is not None:
-            d.text((rx, y + 46), f"Marcados:", font=fn_stat, fill=GRAY)
-            d.text((rx, y + 80), f"{away_s}", font=fn_val, fill=GREEN)
-        if away_c is not None:
-            d.text((rx + 180, y + 46), f"Sofridos:", font=fn_stat, fill=GRAY)
-            d.text((rx + 180, y + 80), f"{away_c}", font=fn_val, fill=(220, 80, 80))
-
-        y += 180
-        hline(d, y, w=800, color=DGRAY)
-        y += 36
-
-    # ── Ultimos 2 jogos de cada time ──
-    home_last = stats.get("home_last2", [])
-    away_last = stats.get("away_last2", [])
-
-    fn_label = font(30, bold=True)
-    fn_game  = font(27)
-    fn_score = font(32, bold=True)
-
-    def result_color(r):
-        return {
-            "V": (50, 200, 100),
-            "E": (200, 180, 50),
-            "D": (200, 70, 70),
-        }.get(r, WHITE)
-
-    if home_last or away_last:
-        ctext(d, "ULTIMOS RESULTADOS", y, font(30, bold=True), GRAY, max_w=880)
-        y += 50
-
-        col_w = (W - 160) // 2
-        lx = 80
-        rx = W // 2 + 40
-
-        d.text((lx, y), home_team[:16], font=fn_label, fill=WHITE)
-        d.text((rx, y), away_team[:16], font=fn_label, fill=WHITE)
-        y += 44
-
-        max_rows = max(len(home_last), len(away_last))
-        for i in range(max_rows):
-            # Casa
-            if i < len(home_last):
-                g = home_last[i]
-                rc = result_color(g["result"])
-                d.rounded_rectangle([lx, y, lx + col_w, y + 72],
-                                     radius=10, fill=(22, 22, 28))
-                d.text((lx + 12, y + 8),
-                       f"{g['home'][:10]} x {g['away'][:10]}", font=fn_game, fill=GRAY)
-                d.text((lx + 12, y + 36), g["score"], font=fn_score, fill=WHITE)
-                d.text((lx + col_w - 50, y + 22), g["result"], font=fn_score, fill=rc)
-
-            # Fora
-            if i < len(away_last):
-                g = away_last[i]
-                rc = result_color(g["result"])
-                d.rounded_rectangle([rx, y, rx + col_w, y + 72],
-                                     radius=10, fill=(22, 22, 28))
-                d.text((rx + 12, y + 8),
-                       f"{g['home'][:10]} x {g['away'][:10]}", font=fn_game, fill=GRAY)
-                d.text((rx + 12, y + 36), g["score"], font=fn_score, fill=WHITE)
-                d.text((rx + col_w - 50, y + 22), g["result"], font=fn_score, fill=rc)
-
-            y += 88
-
-        hline(d, y, w=800, color=DGRAY)
-        y += 36
-
-    # ── Confrontos diretos ──
-    h2h = stats.get("h2h_direct", [])
-    if h2h:
-        ctext(d, "CONFRONTOS DIRETOS (H2H)", y, font(30, bold=True), GRAY, max_w=880)
-        y += 50
-        for g in h2h:
-            d.rounded_rectangle([80, y, W - 80, y + 72], radius=10, fill=(22, 22, 28))
-            label = f"{g['home'][:14]}  {g['score']}  {g['away'][:14]}"
-            ctext(d, label, y + 18, font(30, bold=True), WHITE, max_w=860)
-            d.text((90, y + 48), g.get("date", ""), font=font(24), fill=GRAY)
-            y += 88
-
-    # Rodape
-    ctext(d, "Powered by ODDSHERO AI", H - 80, font(28), GOLD_D)
-    return img
-
-
-# ── Slide TIP ─────────────────────────────────────────────────────────────────
-
-def make_slide_tip(home_team: str, away_team: str, tip_text: str) -> Image.Image:
-    img = Image.new("RGB", (W, H), BG)
-    d   = ImageDraw.Draw(img)
-
-    # Gradiente sutil
-    for y in range(H):
-        v = int(y / H * 18)
-        d.line([(0, y), (W, y)], fill=(10 + v, 10 + v, 14 + v))
-
-    ctext(d, "ODDSHERO AI", 110, font(44, bold=True), GOLD)
-    hline(d, 176, w=440)
-
-    ctext(d, home_team, 230, font(46, bold=True), WHITE, max_w=900)
-    ctext(d, "x", 314, font(38), DGRAY)
-    ctext(d, away_team, 368, font(46, bold=True), WHITE, max_w=900)
-
-    hline(d, 460, w=500, color=DGRAY)
-
-    # Grande label TIP
-    ctext(d, "TIP RECOMENDADA", 510, font(38, bold=True), GRAY)
-
-    # Card da tip
-    card_y = 590
-    card_h = 260
-    d.rounded_rectangle([80, card_y, W - 80, card_y + card_h],
-                         radius=28, fill=CARD, outline=GOLD, width=4)
-
-    # Texto da tip centralizado verticalmente no card
-    fn_tip = font(58, bold=True)
-    # quebra se longo
-    words, lines, cur = tip_text.split(), [], ""
-    for w in words:
-        test = f"{cur} {w}".strip()
-        if d.textbbox((0,0), test, font=fn_tip)[2] > 840 and cur:
-            lines.append(cur); cur = w
-        else:
-            cur = test
-    if cur: lines.append(cur)
-    lh = d.textbbox((0,0), lines[0], font=fn_tip)[3] + 10
-    total_h = len(lines) * lh
-    start_y = card_y + (card_h - total_h) // 2
-    for i, line in enumerate(lines):
-        bx = d.textbbox((0,0), line, font=fn_tip)
-        d.text(((W - bx[2]) // 2, start_y + i * lh), line, font=fn_tip, fill=WHITE)
-
-    # Sublabel
-    ctext(d, "com base em dados estatisticos", card_y + card_h + 32,
-          font(30), GRAY, max_w=800)
-
-    hline(d, card_y + card_h + 90, w=400, color=DGRAY)
-
-    # Rodape
-    ctext(d, "Jogue com responsabilidade  •  +18",
-          H - 160, font(28), DGRAY, max_w=800)
-    ctext(d, "Link na bio  •  @oddshero_bot",
-          H - 108, font(34, bold=True), GOLD)
-    ctext(d, "Telegram gratuito",
-          H - 62, font(28), GRAY)
-
-    return img
-
-
-# ── Pipeline principal ─────────────────────────────────────────────────────────
+# ── Pipeline principal ────────────────────────────────────────────────────────
 
 def run_phase2():
     print("\n" + "=" * 54)
-    print("  VIDEO PIPELINE — FASE 2")
+    print("  VIDEO PIPELINE — FASE 2 (SIMPLIFICADO)")
     print("=" * 54 + "\n")
 
     if not check_ffmpeg():
-        print("[ERRO] FFmpeg nao encontrado.")
-        print("  Instale: https://www.gyan.dev/ffmpeg/builds/")
+        print("[ERRO] FFmpeg não encontrado.")
         sys.exit(1)
 
-    # Carregar dados
+    # Carregar dados da fase 1
     gdp = OUTPUT_DIR / "game_data_latest.json"
-    if not gdp.exists(): gdp = OUTPUT_DIR / "game_data.json"
     if not gdp.exists():
-        print("[ERRO] game_data nao encontrado. Execute a Fase 1.")
+        gdp = OUTPUT_DIR / "game_data.json"
+    if not gdp.exists():
+        print("[ERRO] game_data não encontrado. Execute a Fase 1.")
         sys.exit(1)
 
     with open(gdp, encoding="utf-8") as f:
         data = json.load(f)
 
-    home_team  = data["home_team"]
-    away_team  = data["away_team"]
-    league     = data["league"]
-    match_date = data["match_date"]
-    match_time = data["match_time"]
-    hb_url     = data.get("home_badge_url")
-    ab_url     = data.get("away_badge_url")
-    tip_text   = data.get("tip_display") or data.get("tip", "Confira a analise")
-    stats      = data.get("stats_visual", {})
-    run_ts     = data.get("run_ts", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    home_team   = data["home_team"]
+    away_team   = data["away_team"]
+    league      = data["league"]
+    match_date  = data["match_date"]
+    match_time  = data["match_time"]
+    hb_url      = data.get("home_badge_url")
+    ab_url      = data.get("away_badge_url")
+    tip_display = data.get("tip_display") or data.get("tip", "Confira a análise")
+    script_text = data.get("script", "")
+    run_ts      = data.get("run_ts", datetime.now().strftime("%Y%m%d_%H%M%S"))
 
-    audio_path = Path(data.get("audio_path", ""))
-    if not audio_path.exists():
-        audio_path = OUTPUT_DIR / "audio_narracao.mp3"
-    if not audio_path.exists():
-        print("[ERRO] Audio nao encontrado. Execute a Fase 1.")
+    print(f"  Jogo : {home_team} x {away_team}")
+    print(f"  Tip  : {tip_display}\n")
+
+    # Verificar asset principal
+    video_base = ASSETS_DIR / "video_base_total.mp4"
+    if not video_base.exists():
+        print("[ERRO] Asset não encontrado: assets/video_base_total.mp4")
         sys.exit(1)
 
-    total_dur = audio_duration(audio_path)
+    dur_total = get_video_duration(video_base)
 
-    print(f"  Jogo  : {home_team} x {away_team}")
-    print(f"  Tip   : {tip_text}")
-    print(f"  Audio : {audio_path}  ({total_dur:.1f}s)\n")
+    # Detectar dimensões reais do vídeo
+    global W, H
+    r_probe = subprocess.run([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0", str(video_base)
+    ], capture_output=True, text=True)
+    try:
+        W, H = map(int, r_probe.stdout.strip().split(","))
+    except Exception:
+        W, H = 1064, 1920
+    print(f"  Vídeo base     : {dur_total:.2f}s  ({W}x{H})")
+    print(f"  Slot chroma    : {CHROMA_START}s – {CHROMA_END}s")
+    print(f"  Slot análise   : {SLIDE_START}s – {SLIDE_END}s\n")
 
-    # Duracoes fixas: 12s intro + 12s outro = 24s
-    # O meio (stats + tip) divide o restante igualmente
-    FIXED_INTRO = DUR_V1 + DUR_V2          # 12s
-    FIXED_OUTRO = DUR_V3 + DUR_V4          # 12s
-    meio        = max(4.0, total_dur - FIXED_INTRO - FIXED_OUTRO)
-    dur_stats   = round(meio / 2, 2)
-    dur_tip     = round(meio / 2, 2)
-    dur_v4_real = DUR_V4                   # sem necessidade de estender: o outro cobre exato
-
-    print(f"  Audio total : {total_dur:.1f}s")
-    print(f"  Intro       : {FIXED_INTRO}s (fixo)")
-    print(f"  Stats       : {dur_stats:.1f}s")
-    print(f"  Tip         : {dur_tip:.1f}s")
-    print(f"  Outro       : {FIXED_OUTRO}s (fixo)")
-    print(f"  Total video : {FIXED_INTRO + dur_stats + dur_tip + FIXED_OUTRO:.1f}s\n")
-
-    # Badges
+    # Baixar emblemas
     print("[BADGES] Baixando emblemas...")
     hb = dl(hb_url, TEMP_DIR / "badge_home.png") if hb_url else None
     ab = dl(ab_url, TEMP_DIR / "badge_away.png") if ab_url else None
 
-    # Overlays
-    print("[OVERLAY] Criando paineis...")
-    ov_intro = make_overlay_intro(home_team, away_team, league,
-                                   match_date, match_time, hb, ab)
-    ov_cta   = make_overlay_cta()
-    print(f"  Intro : {ov_intro}")
-    print(f"  CTA   : {ov_cta}")
+    # Gerar overlay dos emblemas
+    print("[OVERLAY] Gerando overlay de emblemas...")
+    overlay_png = make_overlay_emblemas(
+        home_team, away_team, league, match_date, match_time,
+        hb, ab, video_base
+    )
 
-    # Assets
-    vb = {i: ASSETS_DIR / f"video_base{'_' if i > 1 else ''}{'' if i == 1 else i}.mp4"
-          for i in range(1, 5)}
-    # Corrige paths: video_base.mp4, video_base_2.mp4 ... ou video_base2.mp4
-    vb[1] = ASSETS_DIR / "video_base.mp4"
-    vb[2] = ASSETS_DIR / "video_base2.mp4"
-    vb[3] = ASSETS_DIR / "video_base3.mp4"
-    vb[4] = ASSETS_DIR / "video_base4.mp4"
+    # Gerar slide da análise
+    print("[SLIDE] Gerando slide da análise Telegram...")
+    slide_png = make_slide_telegram(
+        home_team, away_team, league, match_time, match_date,
+        script_text, tip_display
+    )
 
-    segs = [TEMP_DIR / f"seg{i}.mp4" for i in range(1, 7)]
+    slide_dur = SLIDE_END - SLIDE_START
 
-    print("\n[VIDEO] Gerando segmentos...")
+    # ── FFmpeg: tudo em um único comando ──────────────────────────────────────
+    # Lógica:
+    #   - [0s–5s]   : chroma key do vídeo base + overlay dos emblemas
+    #   - [5s–13s]  : vídeo base intacto
+    #   - [13s–19s] : vídeo base + slide sobreposto (alpha blend)
+    #   - [19s–fim] : vídeo base intacto
+    #   - Áudio     : original do vídeo base (cópia direta)
 
-    # Seg 1 e 2 — intro robos
-    for i, (dur, vbi, seg) in enumerate(
-        [(DUR_V1, vb[1], segs[0]), (DUR_V2, vb[2], segs[1])], 1
-    ):
-        if vbi.exists():
-            print(f"  Seg {i} ({dur}s): {vbi.name} + overlay intro...")
-            vid_overlay(vbi, ov_intro, dur, seg)
-        else:
-            print(f"  Seg {i}: {vbi.name} nao encontrado — slide escuro")
-            img2vid(Image.new("RGB", (W, H), (10, 10, 16)), dur, seg)
+    print("[VIDEO] Processando vídeo final (único passo)...")
 
-    # Seg 3 — stats
-    print(f"  Seg 3 ({dur_stats:.1f}s): slide de estatisticas...")
-    img2vid(make_slide_stats(home_team, away_team, stats), dur_stats, segs[2])
-
-    # Seg 4 — tip
-    print(f"  Seg 4 ({dur_tip:.1f}s): slide da tip...")
-    img2vid(make_slide_tip(home_team, away_team, tip_text), dur_tip, segs[3])
-
-    # Seg 5 e 6 — outro robos + CTA
-    for i, (dur, vbi, seg) in enumerate(
-        [(DUR_V3, vb[3], segs[4]), (DUR_V4, vb[4], segs[5])], 5
-    ):
-        if vbi.exists():
-            print(f"  Seg {i} ({dur}s): {vbi.name} + overlay CTA...")
-            vid_overlay(vbi, ov_cta, dur, seg)
-        elif vb[1].exists():
-            print(f"  Seg {i}: {vbi.name} nao encontrado — reutilizando video_base.mp4")
-            vid_overlay(vb[1], ov_cta, dur, seg)
-        else:
-            img2vid(Image.new("RGB", (W, H), (8, 8, 18)), dur, seg)
-
-    # Concat
-    print("\n[VIDEO] Concatenando todos os segmentos...")
-    silent = TEMP_DIR / "video_mudo.mp4"
-    concat(segs, silent)
-
-    # Mux audio
-    print("[VIDEO] Adicionando audio...")
     final = OUTPUT_DIR / f"video_final_{run_ts}.mp4"
-    mux(silent, audio_path, final)
+
+    filter_complex = (
+        # Normaliza o vídeo base (dimensões reais detectadas)
+        f"[0:v]setsar=1,fps={FPS}[base];"
+
+        # Overlay dos emblemas escalado para dimensões reais
+        f"[1:v]scale={W}:{H}[ovr];"
+
+        # Slide da análise escalado para dimensões reais
+        f"[2:v]scale={W}:{H}[slide];"
+
+        # Aplica chroma key no trecho 0s–5s:
+        # Separa o segmento com chroma key e o resto
+        f"[base]split=2[base_ck][base_full];"
+        f"[base_ck]trim=start={CHROMA_START}:end={CHROMA_END},setpts=PTS-STARTPTS[seg_ck_raw];"
+        f"[seg_ck_raw]chromakey={CHROMA_COLOR}:{CHROMA_SIMILARITY}:{CHROMA_BLEND}[seg_ck_fg];"
+        f"[ovr]trim=start={CHROMA_START}:end={CHROMA_END},setpts=PTS-STARTPTS[ovr_trim];"
+        f"[ovr_trim][seg_ck_fg]overlay=0:0[seg1];"
+
+        # Segmento do meio (5s–13s) — intacto
+        f"[base_full]trim=start={CHROMA_END}:end={SLIDE_START},setpts=PTS-STARTPTS[seg2];"
+
+        # Segmento da análise (13s–19s) — slide sobreposto
+        f"[base_full]trim=start={SLIDE_START}:end={SLIDE_END},setpts=PTS-STARTPTS[seg3_base];"
+        f"[slide]trim=start=0:end={slide_dur},setpts=PTS-STARTPTS[slide_trim];"
+        f"[seg3_base][slide_trim]overlay=0:0:format=auto[seg3];"
+
+        # Segmento final (19s–fim) — intacto
+        f"[base_full]trim=start={SLIDE_END},setpts=PTS-STARTPTS[seg4];"
+
+        # Concatena tudo
+        f"[seg1][seg2][seg3][seg4]concat=n=4:v=1:a=0[vout]"
+    )
+
+    r = subprocess.run([
+        "ffmpeg", "-y",
+        "-i", str(video_base),        # [0] vídeo base total
+        "-i", str(overlay_png),       # [1] overlay emblemas (PNG estático)
+        "-i", str(slide_png),         # [2] slide análise (PNG estático — loop)
+        "-loop", "1",                 # faz o PNG do slide loopar
+        "-filter_complex", filter_complex,
+        "-map", "[vout]",
+        "-map", "0:a:0",              # áudio original do vídeo base
+        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        str(final)
+    ], capture_output=True)
+
+    if r.returncode != 0:
+        print("[ERRO ffmpeg]", r.stderr.decode(errors="replace")[-1200:])
+        raise RuntimeError("Processamento do vídeo falhou")
 
     size_mb = final.stat().st_size / (1024 * 1024)
 
     print("\n" + "=" * 54)
-    print("  FASE 2 CONCLUIDA")
+    print("  FASE 2 CONCLUÍDA")
     print("=" * 54)
-    print(f"\n  Arquivo  : {final}")
-    print(f"  Tamanho  : {size_mb:.1f} MB")
-    print(f"  Resolucao: {W}x{H}  |  FPS: {FPS}")
-    print()
-    print("  Estrutura do video:")
-    t0 = 0
-    print(f"    [{t0}s-{t0+DUR_V1}s]   video_base.mp4  + overlay emblemas")
-    t0 += DUR_V1
-    print(f"    [{t0}s-{t0+DUR_V2}s]  video_base2.mp4 + overlay emblemas")
-    t0 += DUR_V2
-    print(f"    [{t0}s-{t0+dur_stats:.0f}s]  Slide STATS ({dur_stats:.1f}s)")
-    t0 += dur_stats
-    print(f"    [{t0:.0f}s-{t0+dur_tip:.0f}s]  Slide TIP ({dur_tip:.1f}s)")
-    t0 += dur_tip
-    print(f"    [{t0:.0f}s-{t0+DUR_V3:.0f}s]  video_base3.mp4 + overlay CTA")
-    t0 += DUR_V3
-    print(f"    [{t0:.0f}s-{t0+DUR_V4:.0f}s]  video_base4.mp4 + overlay CTA")
-    print(f"    Total: {total_dur:.1f}s\n")
+    print(f"\n  Arquivo   : {final}")
+    print(f"  Tamanho   : {size_mb:.1f} MB")
+    print(f"  Resolução : {W}x{H}  |  FPS: {FPS}")
+    print(f"\n  Estrutura do vídeo:")
+    print(f"    [0s – {CHROMA_END}s]    Chroma key + emblemas")
+    print(f"    [{CHROMA_END}s – {SLIDE_START}s]   Vídeo normal")
+    print(f"    [{SLIDE_START}s – {SLIDE_END}s]   Slide análise Telegram")
+    print(f"    [{SLIDE_END}s – {dur_total:.1f}s]  Vídeo normal até o fim")
+    print(f"    Áudio: original do vídeo base\n")
 
 
 if __name__ == "__main__":
