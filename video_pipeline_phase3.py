@@ -149,7 +149,7 @@ def build_description(home_team: str, away_team: str, tip_display: str,
 Nossa IA cruza estatísticas ao vivo com as melhores odds do momento.
 ━━━━━━━━━━━━━━━━━━━
 
-#Shorts #Futebol #Apostas #TipsEsportivas #OddsHero #InteligenciaArtificial #BetBrasil #Futebol2026
+#Futebol #ApostasEsportivas #Tips #Apostas #Betano #analisees #brasileirao
 """
 
 
