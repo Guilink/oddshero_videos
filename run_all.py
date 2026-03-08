@@ -33,7 +33,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Horários de execução (hora, minuto) no fuso de Brasília
 SCHEDULE = [
-    (10, 45),
+    (11, 35),
     (13, 0),
     (17, 0),
 ]
@@ -118,7 +118,7 @@ def already_ran_this_slot(hora: int, minuto: int) -> bool:
 
 
 def main():
-    log("Agendador iniciado. Aguardando horários: 09:00, 13:00, 17:00 BRT")
+    log("Agendador iniciado. Aguardando horários: 11:35, 13:00, 17:00 BRT")
 
     # Rastreia qual slot já foi executado nesta sessão
     ran_slots = set()
