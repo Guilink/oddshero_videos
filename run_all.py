@@ -33,8 +33,8 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Horários de execução (hora, minuto) no fuso de Brasília
 SCHEDULE = [
-    (11, 45),
-    (13, 0),
+    (10, 0),
+    (14, 0),
     (17, 0),
 ]
 

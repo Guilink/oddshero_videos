@@ -39,7 +39,7 @@ FOOTBALL_API_BASE = "https://apiv3.apifootball.com/?"
 OUTPUT_DIR        = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Ligas prioritárias — quanto menor o índice, maior a prioridade
+# Ligas prioritárias — fallback quando não há times conhecidos
 PRIORITY_LEAGUES = [
     "302",  # UEFA Champions League
     "175",  # UEFA Europa League
@@ -51,6 +51,29 @@ PRIORITY_LEAGUES = [
     "244",  # Brasileirão Série A
     "245",  # Brasileirão Série B
     "143",  # Copa do Brasil
+]
+
+# Nível 1 — Times brasileiros (maior prioridade)
+BRAZILIAN_TEAMS = [
+    "flamengo", "palmeiras", "corinthians", "são paulo", "sao paulo",
+    "santos", "grêmio", "gremio", "internacional", "atletico mineiro",
+    "atlético mineiro", "fluminense", "botafogo", "vasco", "cruzeiro",
+    "athletico paranaense", "athletico", "bragantino", "fortaleza",
+    "ceará", "ceara", "bahia", "sport", "america mineiro", "américa mineiro",
+    "goias", "goiás", "coritiba", "cuiaba", "cuiabá", "juventude",
+    "avai", "avaí", "chapecoense", "ponte preta", "guarani", "novorizontino",
+]
+
+# Nível 2 — Times famosos do mundo
+WORLD_FAMOUS_TEAMS = [
+    "real madrid", "barcelona", "manchester city", "manchester united",
+    "liverpool", "chelsea", "arsenal", "tottenham", "juventus", "inter milan",
+    "inter de milão", "ac milan", "milan", "napoli", "roma", "lazio",
+    "bayern munich", "bayern", "borussia dortmund", "dortmund",
+    "psg", "paris saint-germain", "paris saint germain",
+    "atletico madrid", "atlético madrid", "sevilla", "valencia",
+    "ajax", "porto", "benfica", "sporting", "celtic", "rangers",
+    "boca juniors", "river plate",
 ]
 
 # Prompt do analista — idêntico ao prompt_pre_template.txt do OddsHero
@@ -220,11 +243,57 @@ async def get_team_badge_url(team_id: str) -> str | None:
 
 # ── Seleção do jogo ───────────────────────────────────────────────────────────
 
+def team_score(team_name: str) -> int:
+    """Retorna pontuação extra baseada no prestígio do time."""
+    name = team_name.lower().strip()
+    # Remove acentos para comparação
+    try:
+        from unidecode import unidecode
+        name = unidecode(name)
+    except Exception:
+        pass
+
+    # Nível 1: times brasileiros (+200)
+    for t in BRAZILIAN_TEAMS:
+        try:
+            from unidecode import unidecode
+            t_norm = unidecode(t)
+        except Exception:
+            t_norm = t
+        if t_norm in name or name in t_norm or (
+            len(t_norm) > 4 and SequenceMatcher(None, name, t_norm).ratio() > 0.82
+        ):
+            return 200
+
+    # Nível 2: times famosos do mundo (+120)
+    for t in WORLD_FAMOUS_TEAMS:
+        try:
+            from unidecode import unidecode
+            t_norm = unidecode(t)
+        except Exception:
+            t_norm = t
+        if t_norm in name or name in t_norm or (
+            len(t_norm) > 4 and SequenceMatcher(None, name, t_norm).ratio() > 0.82
+        ):
+            return 120
+
+    return 0
+
+
 def score_game(game: dict) -> int:
     score     = 0
     league_id = str(game.get("league_id", ""))
+
+    # Pontuação por times (nível 1 e 2)
+    home = game.get("match_hometeam_name", "")
+    away = game.get("match_awayteam_name", "")
+    score += max(team_score(home), team_score(away))
+
+    # Pontuação por liga (nível 3 — fallback)
     if league_id in PRIORITY_LEAGUES:
         score += 100 - PRIORITY_LEAGUES.index(league_id) * 10
+
+    # Bônus para jogos nas próximas 12h
     try:
         match_dt   = datetime.strptime(
             f"{game['match_date']} {game['match_time']}", "%Y-%m-%d %H:%M"
@@ -234,19 +303,75 @@ def score_game(game: dict) -> int:
             score += 20
     except Exception:
         pass
+
     return score
 
 
+def get_posted_today_ids() -> set:
+    """Lê os match_ids já postados hoje do posted_today.json."""
+    control = OUTPUT_DIR / "posted_today.json"
+    today   = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d")
+    if not control.exists():
+        return set()
+    try:
+        data = json.loads(control.read_text(encoding="utf-8"))
+        if data.get("date") != today:
+            return set()
+        return set(str(m) for m in data.get("match_ids", []))
+    except Exception:
+        return set()
+
+
 async def pick_best_game(games: list):
-    for game in sorted(games, key=score_game, reverse=True)[:15]:
-        predictions = await get_predictions(str(game.get("match_id", "")))
+    sorted_games   = sorted(games, key=score_game, reverse=True)
+    already_posted = get_posted_today_ids()
+
+    if already_posted:
+        print(f"[SELEÇÃO] Jogos já postados hoje: {already_posted}")
+
+    # Log do top 5 para debug
+    print("[SELEÇÃO] Top 5 jogos ranqueados:")
+    for g in sorted_games[:5]:
+        home  = g['match_hometeam_name']
+        away  = g['match_awayteam_name']
+        pts   = score_game(g)
+        ts_h  = team_score(home)
+        ts_a  = team_score(away)
+        mid   = str(g.get("match_id", ""))
+        nivel = "🇧🇷 Brasileiro" if max(ts_h, ts_a) >= 200 else (
+                "🌍 Famoso"     if max(ts_h, ts_a) >= 120 else
+                "📋 Fallback")
+        dup   = " ⚠️ JÁ POSTADO" if mid in already_posted else ""
+        print(f"  [{pts}pts] {home} x {away} — {nivel} | {g.get('league_name')}{dup}")
+
+    for game in sorted_games[:15]:
+        match_id = str(game.get("match_id", ""))
+
+        # Pula jogos já postados hoje
+        if match_id in already_posted:
+            print(f"[SELEÇÃO] Pulando {game['match_hometeam_name']} x {game['match_awayteam_name']} — já postado hoje.")
+            continue
+
+        predictions = await get_predictions(match_id)
         if predictions:
-            print(f"[SELEÇÃO] {game['match_hometeam_name']} x {game['match_awayteam_name']}")
-            print(f"          Liga: {game.get('league_name')} | {game['match_date']} {game['match_time']}")
+            home  = game['match_hometeam_name']
+            away  = game['match_awayteam_name']
+            pts   = score_game(game)
+            ts    = max(team_score(home), team_score(away))
+            nivel = "🇧🇷 Brasileiro" if ts >= 200 else (
+                    "🌍 Famoso"     if ts >= 120 else
+                    "📋 Fallback liga")
+            print(f"\n[SELEÇÃO] ✓ {home} x {away}")
+            print(f"          Liga : {game.get('league_name')}")
+            print(f"          Score: {pts}pts — {nivel}")
+            print(f"          Data : {game['match_date']} {game['match_time']}")
             return game, predictions
-    print("[SELEÇÃO] Nenhum jogo com predictions. Usando o primeiro disponível.")
-    games_sorted = sorted(games, key=score_game, reverse=True)
-    return (games_sorted[0], None) if games_sorted else (None, None)
+
+    print("[SELEÇÃO] Nenhum jogo elegível com predictions. Usando o primeiro não postado.")
+    for game in sorted_games:
+        if str(game.get("match_id", "")) not in already_posted:
+            return game, None
+    return None, None
 
 
 # ── Formatação de dados (idêntico ao OddsHero) ───────────────────────────────
